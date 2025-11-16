@@ -507,57 +507,93 @@ forecast periods, ranges, or time windows.
                     st.code(traceback.format_exc())
 
 # ---------------------------------------------------------
-# STEP FIVE — Create a Semantic Summary For Future Q&A
+# STEP FIVE — Create Clean Summary for Future Q&A (Fixed)
 # ---------------------------------------------------------
 
+import google.generativeai as genai
+
+# --- Helper: Build a clean JSON dataset ------------------
+def build_clean_nws_json():
+    """
+    Return only the clean JSON subset of the NWS data.
+    Excludes diagnostics, tracebacks, error strings, and fetch-status details.
+    Ensures valid JSON for Gemini ingestion.
+    """
+
+    raw = st.session_state.get("nws_data", {})
+
+    clean = {
+        "metadata": raw.get("metadata", {}),
+
+        # Forecast (text periods)
+        "forecast": raw.get("forecast", {}),
+
+        # Hourly forecast
+        "forecastHourly": raw.get("forecast_hourly", raw.get("forecastHourly", {})),
+
+        # Detailed gridpoint data
+        "forecastGridData": raw.get("forecast_grid_data", raw.get("forecastGridData", {})),
+
+        # Observation stations
+        "stations": raw.get("stations", {}),
+
+        # Grid info (optional but helpful)
+        "gridInfo": {
+            "office": raw.get("metadata", {}).get("gridId"),
+            "gridX": raw.get("metadata", {}).get("gridX"),
+            "gridY": raw.get("metadata", {}).get("gridY"),
+        }
+    }
+
+    return json.dumps(clean, ensure_ascii=False)
+
+
+# --- Summary generation logic ----------------------------
 if "nws_data" in st.session_state and "nws_semantic_summary" not in st.session_state:
 
     st.write("## Preparing Weather Intelligence Model")
-    st.info("Creating a compact internal weather summary for future questions...")
+    st.info("Creating a compact internal summary for conversational weather reasoning...")
 
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    except Exception as e:
-        st.error("Gemini API key not found in st.secrets.")
+    except Exception:
+        st.error("Missing Gemini API Key in st.secrets['GEMINI_API_KEY']")
         st.stop()
 
     model = genai.GenerativeModel("gemini-2.5-flash")
 
-    with st.spinner("Analyzing detailed NWS data..."):
+    with st.spinner("Analyzing detailed NWS data…"):
 
         try:
-            full_json_str = json.dumps(st.session_state["nws_data"])
+            full_json_str = build_clean_nws_json()
 
             summary_prompt = f"""
-You are an expert meteorologist. I will provide a very large JSON dataset from the
-National Weather Service gridpoint API.
+You are an expert meteorologist. I will provide a large, cleaned JSON dataset from
+the National Weather Service gridpoint API.
 
 Your job:
-1. Read ALL the data carefully.
-2. Build a **compact internal representation** of the forecast.
-3. Extract all weather-relevant elements, including:
+1. Read **all** data carefully.
+2. Extract every weather-relevant variable and transform it into a compact,
+   internal summary suitable for multi-turn question answering.
+3. Include:
    - temperatures
-   - dewpoint
-   - humidity
+   - dewpoint and humidity
    - cloud cover
-   - precipitation probability (PoP)
-   - wind speeds & gusts
-   - hazards, fire danger, marine concerns
-   - timing information
-   - trends across the next 48–72 hours
-4. Compress this knowledge into ~2000–5000 characters.
-5. Do NOT exceed 10,000 characters.
-6. Maintain enough detail to answer complex judgment questions like:
+   - precipitation probability
+   - wind speed and gusts
+   - timing relationships
+   - hazards (fire, flood, marine, wind)
+   - atmospheric patterns or notable transitions
+4. Summarize the next 72 hours with enough fidelity to answer deep judgment
+   questions like:
    - “Will my tennis tournament get rained out?”
-   - “Is fire danger elevated?”
-   - “How windy will tomorrow afternoon be?”
-   - “Compare morning vs evening humidity.”
-
-Your output must be a **single consolidated summary** containing:
-- Key weather variables by time period
-- Important thresholds
-- Notable hazards
-- Any other useful scientific insights
+   - “Is fire weather risk elevated?”
+   - “What time will winds peak tomorrow?”
+   - “Which day has higher humidity?”
+5. Your output must be:
+   - a **single consolidated summary**
+   - ≤ 10,000 characters
+   - rich enough for the model to reason from alone
 """
 
             response = model.generate_content(
@@ -568,16 +604,16 @@ Your output must be a **single consolidated summary** containing:
                 stream=False
             )
 
-            semantic_summary = response.text
+            semantic_summary = response.text.strip()
             st.session_state["nws_semantic_summary"] = semantic_summary
 
             st.success("Semantic weather summary created successfully!")
 
-            if st.checkbox("Show semantic weather summary (debug)"):
-                st.text_area("Weather Summary", semantic_summary, height=300)
+            if st.checkbox("Show summary (debug)"):
+                st.text_area("Semantic Summary", semantic_summary, height=350)
 
-        except Exception as e:
-            st.error("Failed to create weather summary.")
+        except Exception:
+            st.error("Failed to generate summary.")
             st.json(traceback.format_exc())
 
 # ---------------------------------------------------------
