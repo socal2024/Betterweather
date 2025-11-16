@@ -402,7 +402,7 @@ else:
     # Initialize Gemini
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model_name = "gemini-2.5-flash-latest"
+        model_name = "gemini-2.5-flash"
         model = genai.GenerativeModel(model_name)
         if gemini_debug:
             st.write("### Gemini Configuration Debug")
