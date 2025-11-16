@@ -405,7 +405,7 @@ else:
         st.error("Gemini API key not found in st.secrets['GEMINI_API_KEY'].")
         st.stop()
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-flash-latest")
 
     if st.button("Get Answer") and user_query:
         with st.spinner("Analyzing weather data with Gemini…"):
