@@ -145,3 +145,155 @@ if submit and location_text.strip():
     else:
         st.error("Could not resolve the location.")
         st.json(diag)
+
+
+# ---------------------------------------------------------
+# STEP TWO
+# ---------------------------------------------------------
+
+# ---------------------------------------------------------
+# Helper: Safe GET with debugging and optional retry
+# ---------------------------------------------------------
+def safe_get(url, headers, debug=False, retries=1):
+    diag = {"url": url}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        diag["status_code"] = resp.status_code
+        diag["response_headers"] = dict(resp.headers)
+
+        # Retry once if server-side error
+        if resp.status_code >= 500 and retries > 0:
+            if debug:
+                st.warning(f"Retrying {url}")
+            return safe_get(url, headers, debug, retries - 1)
+
+        if resp.status_code != 200:
+            diag["error"] = f"HTTP {resp.status_code}"
+            return None, diag
+
+        # Attempt JSON decoding
+        try:
+            data = resp.json()
+            diag["success"] = True
+            return data, diag
+        except Exception:
+            diag["error"] = "JSON decode failed"
+            diag["exception"] = traceback.format_exc()
+            return None, diag
+
+    except Exception as e:
+        diag["exception"] = traceback.format_exc()
+        return None, diag
+
+
+# ---------------------------------------------------------
+# Main function: Fetch ALL NWS data from lat/lon
+# ---------------------------------------------------------
+def fetch_nws_from_latlon(lat, lon, debug=False):
+    diagnostics = {}
+
+    # NWS requires a genuine user-agent string
+    headers = {"User-Agent": "NWS-Forecast-App/1.0 (contact@example.com)"}
+
+    # -----------------------------------------------------
+    # 1. Call the /points endpoint
+    # -----------------------------------------------------
+    points_url = f"https://api.weather.gov/points/{lat},{lon}"
+
+    points_json, points_diag = safe_get(points_url, headers, debug)
+    diagnostics["points"] = points_diag
+
+    if points_json is None:
+        return None, diagnostics
+
+    props = points_json.get("properties", {})
+
+    # Extract main metadata
+    office = props.get("gridId")
+    gridX = props.get("gridX")
+    gridY = props.get("gridY")
+
+    diagnostics["grid_info"] = {
+        "office": office,
+        "gridX": gridX,
+        "gridY": gridY,
+    }
+
+    # Collect available URLs
+    urls_to_fetch = {
+        "forecast": props.get("forecast"),
+        "forecast_hourly": props.get("forecastHourly"),
+        "forecast_grid_data": props.get("forecastGridData"),
+        "stations": props.get("observationStations"),
+    }
+
+    results = {"metadata": props}
+    fetch_status = {}  # for user-facing success table
+
+    # -----------------------------------------------------
+    # 2. Fetch all available dependent endpoints
+    # -----------------------------------------------------
+    for key, url in urls_to_fetch.items():
+        if url is None:
+            fetch_status[key] = "Missing URL in metadata"
+            continue
+
+        data, diag = safe_get(url, headers, debug)
+        diagnostics[key] = diag
+
+        if data is not None:
+            results[key] = data
+            fetch_status[key] = "✔ Success"
+        else:
+            fetch_status[key] = f"❌ Failed ({diag.get('error', 'Unknown error')})"
+
+    # -----------------------------------------------------
+    # 3. Return dictionary containing:
+    #    - detailed grid data
+    #    - standard forecast
+    #    - hourly forecast
+    #    - stations
+    #    - full metadata
+    # -----------------------------------------------------
+    results["fetch_status"] = fetch_status
+    return results, diagnostics
+
+
+# ---------------------------------------------------------
+# Streamlit UI section to call the fetcher
+# ---------------------------------------------------------
+if "lat" in st.session_state and "lon" in st.session_state:
+    st.write("### Retrieve Detailed NWS Forecast")
+
+    debug_mode = st.checkbox("Enable NWS Debug Mode")
+
+    if st.button("Fetch NWS Weather Data"):
+        with st.spinner("Contacting NWS…"):
+            nws_data, diag = fetch_nws_from_latlon(
+                st.session_state["lat"],
+                st.session_state["lon"],
+                debug=debug_mode,
+            )
+
+        st.write("---")
+
+        if nws_data is None:
+            st.error("Failed to retrieve NWS data.")
+            if debug_mode:
+                st.json(diag)
+        else:
+            st.success("NWS data retrieved successfully!")
+
+            # Save for future pages
+            st.session_state["nws_data"] = nws_data
+
+            # Show success indicators
+            st.write("### Endpoint Fetch Status")
+            st.json(nws_data["fetch_status"])
+
+            # Optional debug dump
+            if debug_mode:
+                st.write("### Debug Diagnostics")
+                st.json(diag)
+else:
+    st.info("Please resolve a location first.")
