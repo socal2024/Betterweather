@@ -4,101 +4,117 @@ import traceback
 import json
 
 # ---------------------------------------------------------
-# Helper: Basic geocoder using Nominatim (OpenStreetMap)
+# Helper: US Census Geocoder
 # ---------------------------------------------------------
-def geocode_location(location_text: str, debug=False):
+def geocode_us_location(location_text: str, debug=False):
     """
-    Accepts city/state, ZIP, full address, or lat/long pair.
-    Returns (lat, lon) or None, plus diagnostic info.
+    Geocodes a U.S. address, ZIP code, or city/state using the
+    U.S. Census Geocoder (no API key required).
+    Returns (lat, lon) or None and diagnostics.
     """
     diagnostics = {}
 
-    # ----------- Try lat/long directly -----------
+    # --- 1. Try direct lat/long parsing -----------------------
     if "," in location_text:
         parts = [p.strip() for p in location_text.split(",")]
         if len(parts) == 2:
             try:
                 lat = float(parts[0])
                 lon = float(parts[1])
-                diagnostics["method"] = "direct lat/lon parse"
+                diagnostics["method"] = "direct lat/lon"
                 return (lat, lon), diagnostics
             except ValueError:
-                diagnostics["latlon_parse_error"] = "Failed to parse lat/lon text"
+                diagnostics["latlon_error"] = "Could not parse lat/lon"
 
-    # ----------- Use Nominatim -----------
-    url = "https://nominatim.openstreetmap.org/search"
+    # --- 2. U.S. Census address geocoding ---------------------
+    census_url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
     params = {
-        "q": location_text,
-        "format": "json",
-        "limit": 1,
-        "addressdetails": 1
+        "address": location_text,
+        "benchmark": "Public_AR_Current",
+        "format": "json"
     }
 
-    headers = {
-        "User-Agent": "NWS-Forecast-App/1.0 (contact@example.com)"
-    }
-
-    diagnostics["request_url"] = url
-    diagnostics["request_params"] = params
-    diagnostics["request_headers"] = headers
+    diagnostics["census_request_url"] = census_url
+    diagnostics["census_params"] = params
 
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp = requests.get(census_url, params=params, timeout=10)
         diagnostics["status_code"] = resp.status_code
-        diagnostics["response_headers"] = dict(resp.headers)
-
-        if debug:
-            st.write("### Raw Response Headers")
-            st.json(dict(resp.headers))
 
         if resp.status_code != 200:
             diagnostics["http_error"] = f"HTTP {resp.status_code}"
             return None, diagnostics
 
-        results = resp.json()
-        diagnostics["raw_json"] = results
+        data = resp.json()
+        diagnostics["raw_json"] = data
 
-        if debug:
-            st.write("### Raw JSON From Nominatim")
-            st.json(results)
+        result_list = data.get("result", {}).get("addressMatches", [])
+        if result_list:
+            # Take the first match
+            match = result_list[0]
+            coords = match["coordinates"]
+            lat = coords["y"]
+            lon = coords["x"]
+            diagnostics["method"] = "census_address"
+            return (lat, lon), diagnostics
 
-        if not results:
-            diagnostics["error"] = "No results returned"
-            return None, diagnostics
-
-        lat = float(results[0]["lat"])
-        lon = float(results[0]["lon"])
-        diagnostics["method"] = "nominatim geocoding"
-
-        return (lat, lon), diagnostics
-
-    except Exception as e:
+    except Exception:
         diagnostics["exception"] = traceback.format_exc()
         return None, diagnostics
+
+    # --- 3. ZIP or city fallback using Census "find" endpoint ---
+    # ZIP & city/state geocoding:
+    find_url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+    params = {
+        "address": location_text,
+        "benchmark": "4",
+        "format": "json"
+    }
+
+    diagnostics["fallback_request_url"] = find_url
+    diagnostics["fallback_params"] = params
+
+    try:
+        resp = requests.get(find_url, params=params, timeout=10)
+        diagnostics["fallback_status"] = resp.status_code
+
+        if resp.status_code == 200:
+            data = resp.json()
+            diagnostics["fallback_json"] = data
+
+            result_list = data.get("result", {}).get("addressMatches", [])
+            if result_list:
+                match = result_list[0]
+                coords = match["coordinates"]
+                diagnostics["method"] = "census_fallback"
+                return (coords["y"], coords["x"]), diagnostics
+
+    except Exception:
+        diagnostics["fallback_exception"] = traceback.format_exc()
+
+    # --- Final: No match ----------------------------------------
+    diagnostics["error"] = "Unable to geocode with US Census"
+    return None, diagnostics
 
 
 # ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
-st.set_page_config(page_title="Detailed NWS Forecast", layout="centered")
+st.set_page_config(page_title="Detailed NWS Forecast")
 
 st.title("NWS Gridpoint Forecast Explorer")
 
 st.write("""
 Welcome!  
-This tool provides highly detailed, location-specific forecasts from  
-the **National Weather Service Gridpoint API**.
-
-To begin, enter a location below.  
-You can use a **city + state**, a **full address**, a **ZIP code**,  
-or enter **latitude, longitude** directly.
+Enter a **U.S. city**, **ZIP code**, **full address**, or **latitude, longitude**  
+to retrieve detailed National Weather Service gridpoint forecasts.
 """)
 
 debug_mode = st.checkbox("Enable debug mode")
 
 location_text = st.text_input(
-    "Enter a location",
-    placeholder="e.g., Seattle WA, 90210, 34.05 -118.25, or a full address",
+    "Enter location",
+    placeholder="e.g., 1040 Lavender Lane, La Canada CA 91011, or 34.05,-118.25",
 )
 
 submit = st.button("Find Location")
@@ -108,30 +124,24 @@ submit = st.button("Find Location")
 # Processing
 # ---------------------------------------------------------
 if submit and location_text.strip():
-
-    st.info("Processing your request…")
+    st.info("Processing…")
 
     with st.spinner("Resolving location…"):
-        coords, diag = geocode_location(location_text.strip(), debug=debug_mode)
+        coords, diag = geocode_us_location(location_text.strip(), debug=debug_mode)
 
     st.write("---")
 
-    # Show diagnostics if debug mode is enabled
     if debug_mode:
         st.write("### Diagnostics")
         st.json(diag)
 
-    # Handle success
     if coords:
         lat, lon = coords
-        st.success(f"Location resolved: **{lat:.4f}, {lon:.4f}**")
+        st.success(f"Location resolved: **{lat:.5f}, {lon:.5f}**")
+
         st.session_state["lat"] = lat
         st.session_state["lon"] = lon
-        st.write("You can now proceed to fetch the detailed NWS forecast.")
-
-    # Handle failure
+        st.write("Ready to fetch NWS gridpoint data.")
     else:
-        st.error("❌ Could not resolve the location.")
-        st.write("Here’s what we know:")
+        st.error("Could not resolve the location.")
         st.json(diag)
-        st.info("Try another format or enable debug mode for more details.")
