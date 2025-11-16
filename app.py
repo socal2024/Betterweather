@@ -297,3 +297,71 @@ if "lat" in st.session_state and "lon" in st.session_state:
                 st.json(diag)
 else:
     st.info("Please resolve a location first.")
+
+    # -----------------------------------------------------
+    # STEP THREE
+    # -----------------------------------------------------
+
+from datetime import datetime, timedelta
+
+# Ensure NWS data is loaded
+if "nws_data" in st.session_state:
+
+    forecast = st.session_state["nws_data"].get("forecast", {})
+    periods = forecast.get("properties", {}).get("periods", [])
+
+    if not periods:
+        st.error("No forecast period data returned by NWS.")
+    else:
+        # Determine tomorrow's date (local time)
+        tomorrow = (datetime.now()).date() + timedelta(days=1)
+
+        # Try to find a forecast period matching tomorrow
+        tomorrow_periods = []
+        for p in periods:
+            # Example startTime: "2025-01-17T06:00:00-08:00"
+            try:
+                start_date = datetime.fromisoformat(p["startTime"]).date()
+                if start_date == tomorrow:
+                    tomorrow_periods.append(p)
+            except Exception:
+                pass
+
+        if not tomorrow_periods:
+            st.warning("No specific forecast for tomorrow was found in the API data.")
+        else:
+            # Use the first matching period, usually "Tomorrow" or "Tomorrow Night"
+            p = tomorrow_periods[0]
+
+            name = p.get("name", "Tomorrow")
+            short = p.get("shortForecast", "")
+            temp = p.get("temperature")
+            temp_unit = p.get("temperatureUnit", "F")
+            wind = p.get("windSpeed", "")
+            wind_dir = p.get("windDirection", "")
+            detailed = p.get("detailedForecast", "")
+
+            # Build a concise one-paragraph summary
+            summary = (
+                f"{name} is expected to bring {short.lower()}. "
+                f"Temperatures will be around {temp}°{temp_unit}, "
+                f"with winds from the {wind_dir} at {wind}. "
+                f"{detailed}"
+            )
+
+            st.write("### Tomorrow's Weather Summary")
+            st.write(summary)
+
+            # Offer next steps to the user
+            st.write("---")
+            st.write("""
+            You can request a more detailed forecast, explore specific weather data
+            such as dewpoint or cloud cover, or ask a question about tomorrow's
+            conditions.  
+            For example, you can ask:
+            - *“Will it be windy tomorrow afternoon?”*  
+            - *“What’s the chance of precipitation tomorrow night?”*  
+            - *“Show me the dewpoint trend tomorrow.”*
+            """)
+else:
+    st.info("NWS data is not yet loaded. Fetch data first.")
