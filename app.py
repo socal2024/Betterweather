@@ -371,6 +371,7 @@ else:
 # ---------------------------------------------------------
 
 import google.generativeai as genai
+from datetime import datetime
 
 # ---------------------------------------------------------
 # Gemini-Powered Weather Q&A
@@ -391,7 +392,7 @@ Examples:
 if "nws_data" not in st.session_state:
     st.info("Please fetch NWS data before asking a question.")
 else:
-    debug_mode = st.checkbox("Enable Gemini Debug Mode")
+    gemini_debug = st.checkbox("Enable Gemini Debug Mode")
 
     user_query = st.text_input(
         "Ask a weather question",
@@ -401,18 +402,25 @@ else:
     # Initialize Gemini
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        model_name = "gemini-2.5-flash-latest"
+        model = genai.GenerativeModel(model_name)
+        if gemini_debug:
+            st.write("### Gemini Configuration Debug")
+            st.json({
+                "configured": True,
+                "model_name": model_name,
+            })
     except Exception as e:
-        st.error("Gemini API key not found in st.secrets['GEMINI_API_KEY'].")
+        st.error("Gemini API key not found or configuration failed.")
+        if gemini_debug:
+            st.write("### Gemini Configuration Error")
+            st.code(traceback.format_exc())
         st.stop()
-
-    model = genai.GenerativeModel("gemini-flash-latest")
 
     if st.button("Get Answer") and user_query:
         with st.spinner("Analyzing weather data with Gemini…"):
-
-            # Prepare system prompt
+            # Prepare system-style instructions
             today_str = datetime.now().strftime("%A %B %d, %Y")
-
             system_prompt = f"""
 You are an expert meteorologist using detailed National Weather Service
 gridpoint forecast data. Today is {today_str}. Use the provided dataset
@@ -435,29 +443,47 @@ Examples of the kinds of questions you can answer:
 
 ALWAYS ground your answer in the actual data. When relevant, cite specific
 forecast periods, ranges, or time windows.
-"""
+""".strip()
 
             # Convert NWS JSON to string (ensure serializable)
             try:
                 nws_json_str = json.dumps(st.session_state["nws_data"])
             except Exception:
                 st.error("Error converting NWS data to JSON.")
-                if debug_mode:
-                    st.json(traceback.format_exc())
+                if gemini_debug:
+                    st.write("### JSON Serialization Error")
+                    st.code(traceback.format_exc())
                 st.stop()
 
-            # Construct final input to Gemini
-            full_input = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Here is the full NWS forecast dataset:\n\n{nws_json_str}"},
-                {"role": "user", "content": f"User question: {user_query}"}
+            # Debug info about the payload we are about to send
+            if gemini_debug:
+                st.write("### Gemini Request Debug")
+                st.json({
+                    "today": today_str,
+                    "nws_json_length_chars": len(nws_json_str),
+                    "nws_top_level_keys": list(st.session_state["nws_data"].keys()),
+                    "example_metadata_keys": list(
+                        st.session_state["nws_data"]
+                        .get("metadata", {})
+                        .keys()
+                    ) if "metadata" in st.session_state["nws_data"] else [],
+                    "user_query": user_query,
+                })
+
+            # Construct the input to Gemini as a list of text parts
+            # (google-generativeai does NOT use role-based dicts like OpenAI)
+            contents = [
+                system_prompt,
+                "Here is the full NWS forecast dataset as JSON:",
+                nws_json_str,
+                f"User question: {user_query}",
             ]
 
             # Perform the streaming request
             try:
                 response = model.generate_content(
-                    full_input,
-                    stream=True
+                    contents,
+                    stream=True,
                 )
 
                 st.write("### Answer")
@@ -465,15 +491,17 @@ forecast periods, ranges, or time windows.
                 final_text = ""
 
                 for chunk in response:
-                    if chunk.text:
+                    # chunk.text aggregates the text for that stream piece
+                    if hasattr(chunk, "text") and chunk.text:
                         final_text += chunk.text
                         answer_container.write(final_text)
 
-                if debug_mode:
-                    st.write("### Debug: Raw Model Response")
-                    st.json(final_text)
+                if gemini_debug:
+                    st.write("### Debug: Final Gemini Text")
+                    st.code(final_text)
 
             except Exception as e:
-                st.error("Gemini request failed.")
-                if debug_mode:
-                    st.json(traceback.format_exc())
+                st.error(f"Gemini request failed: {e}")
+                if gemini_debug:
+                    st.write("### Gemini Exception Traceback")
+                    st.code(traceback.format_exc())
