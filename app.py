@@ -507,7 +507,7 @@ forecast periods, ranges, or time windows.
                     st.code(traceback.format_exc())
 
 # ---------------------------------------------------------
-# STEP FIVE — Conversational Mode with Memory
+# STEP FIVE — Conversational Mode with Memory (Unlimited Follow-Ups)
 # ---------------------------------------------------------
 
 st.write("## Continue the Conversation")
@@ -523,80 +523,96 @@ This mode **remembers context**, so you can ask things like:
 if "nws_data" not in st.session_state:
     st.info("Fetch NWS data first to enable conversation mode.")
 else:
-    # Initialize chat history on first run
+
+    # Initialize chat history if needed
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
+    # Persistent input field state
+    if "followup_question" not in st.session_state:
+        st.session_state["followup_question"] = ""
+
     conv_debug = st.checkbox("Enable Conversation Debug Mode")
 
-    followup_question = st.text_input(
-        "Ask another question",
-        placeholder="e.g., What happens later in the day?"
-    )
-
-    # Reuse the same Gemini configuration
+    # Reuse Gemini configuration
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
     except Exception:
         st.error("Gemini API key missing or invalid.")
         if conv_debug:
             st.code(traceback.format_exc())
         st.stop()
 
-    if st.button("Ask Follow-Up") and followup_question.strip():
-        with st.spinner("Thinking…"):
-            # Prepare the conversation prompt
-            today_str = datetime.now().strftime("%A %B %d, %Y")
+    # -----------------------------------------------------
+    # DISPLAY CHAT HISTORY (oldest → newest)
+    # -----------------------------------------------------
+    if st.session_state["chat_history"]:
+        st.write("### Conversation History")
+        for i, turn in enumerate(st.session_state["chat_history"], 1):
+            st.markdown(f"**Q{i}:** {turn['user']}")
+            st.markdown(f"**A{i}:** {turn['assistant']}")
+            st.write("---")
 
-            # System prompt stays constant
+    # -----------------------------------------------------
+    # NEW QUESTION INPUT — always displayed at bottom
+    # -----------------------------------------------------
+    new_q = st.text_input(
+        "Ask another question",
+        value=st.session_state["followup_question"],
+        key="followup_question",
+        placeholder="e.g., What about later in the afternoon?",
+    )
+
+    ask = st.button("Ask Follow-Up")
+
+    if ask and new_q.strip():
+        with st.spinner("Thinking…"):
+
+            # --- Build conversation context ---
+            today_str = datetime.now().strftime("%A %B %d, %Y")
             system_prompt = f"""
 You are an expert meteorologist using detailed National Weather Service
-gridpoint forecast data. Today is {today_str}.
-You are in a multi-turn conversation. Maintain context across turns.
-Use the provided dataset to answer questions clearly and with insight.
-Ground all reasoning in actual data.
+gridpoint forecast data. Today is {today_str}. Maintain context across
+turns. Use the provided dataset to answer questions with insight.
 """.strip()
 
-            # Serialize the NWS dataset for the model
+            # Serialize dataset
             try:
                 nws_json_str = json.dumps(st.session_state["nws_data"])
             except Exception:
-                st.error("Failed to serialize NWS data for conversation.")
+                st.error("Failed to serialize NWS data.")
                 if conv_debug:
                     st.code(traceback.format_exc())
                 st.stop()
 
-            # Build the conversation context
-            # Gemini expects a list of text items, not role-based dicts
-            conversation_parts = [
+            # Build content list
+            contents = [
                 system_prompt,
                 "Here is the full NWS dataset as JSON:",
                 nws_json_str,
-                "\nConversation so far:",
+                "Conversation so far:"
             ]
 
-            # Add previous exchanges
             for turn in st.session_state["chat_history"]:
-                conversation_parts.append(f"User: {turn['user']}")
-                conversation_parts.append(f"Assistant: {turn['assistant']}")
+                contents.append(f"User: {turn['user']}")
+                contents.append(f"Assistant: {turn['assistant']}")
 
-            # Add the new user question
-            conversation_parts.append(f"User: {followup_question}")
+            contents.append(f"User: {new_q}")
 
-            # Debug dump of outgoing prompt
+            # Debug info
             if conv_debug:
                 st.write("### Conversation Debug")
                 st.json({
-                    "nws_json_length": len(nws_json_str),
-                    "num_previous_turns": len(st.session_state["chat_history"]),
-                    "latest_question": followup_question,
+                    "json_length": len(nws_json_str),
+                    "num_past_turns": len(st.session_state["chat_history"]),
+                    "new_question": new_q,
                 })
 
-            # --- Generate a streaming response ---
+            # --- STREAMING RESPONSE ---
             try:
                 response = model.generate_content(
-                    conversation_parts,
+                    contents,
                     stream=True,
                 )
 
@@ -610,21 +626,16 @@ Ground all reasoning in actual data.
                         answer_box.write(final_answer)
 
             except Exception as e:
-                st.error("Conversation request failed.")
+                st.error("Gemini request failed.")
                 if conv_debug:
                     st.code(traceback.format_exc())
                 st.stop()
 
-            # Store turn in history
+            # Store in history for future turns
             st.session_state["chat_history"].append({
-                "user": followup_question,
+                "user": new_q,
                 "assistant": final_answer,
             })
 
-    # --- Display chat history (oldest to newest) ---
-    if st.session_state["chat_history"]:
-        st.write("### Conversation History")
-        for i, turn in enumerate(st.session_state["chat_history"], 1):
-            st.markdown(f"**Q{i}:** {turn['user']}")
-            st.markdown(f"**A{i}:** {turn['assistant']}")
-            st.write("---")
+            # Reset the input box so it's ready for the next follow-up
+            st.session_state["followup_question"] = ""
