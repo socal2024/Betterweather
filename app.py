@@ -365,3 +365,115 @@ if "nws_data" in st.session_state:
             """)
 else:
     st.info("NWS data is not yet loaded. Fetch data first.")
+
+# ---------------------------------------------------------
+# STEP FOUR
+# ---------------------------------------------------------
+
+import google.generativeai as genai
+
+# ---------------------------------------------------------
+# Gemini-Powered Weather Q&A
+# ---------------------------------------------------------
+
+st.write("## Ask a Weather Question")
+st.write("""
+You can ask detailed natural-language questions about the weather using
+the full National Weather Service gridpoint dataset.  
+Examples:
+- *“Will my tennis tournament get rained out tomorrow afternoon?”*  
+- *“Is fire risk higher than usual today?”*  
+- *“What’s the best time to hike tomorrow?”*  
+- *“Compare wind gust threats between today and tomorrow.”*  
+""")
+
+# Make sure NWS data is available
+if "nws_data" not in st.session_state:
+    st.info("Please fetch NWS data before asking a question.")
+else:
+    debug_mode = st.checkbox("Enable Gemini Debug Mode")
+
+    user_query = st.text_input(
+        "Ask a weather question",
+        placeholder="e.g., What is tomorrow's dewpoint trend?"
+    )
+
+    # Initialize Gemini
+    try:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    except Exception as e:
+        st.error("Gemini API key not found in st.secrets['GEMINI_API_KEY'].")
+        st.stop()
+
+    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    if st.button("Get Answer") and user_query:
+        with st.spinner("Analyzing weather data with Gemini…"):
+
+            # Prepare system prompt
+            today_str = datetime.now().strftime("%A %B %d, %Y")
+
+            system_prompt = f"""
+You are an expert meteorologist using detailed National Weather Service
+gridpoint forecast data. Today is {today_str}. Use the provided dataset
+to answer the user's question in a clear, natural, human-readable way.
+Incorporate multiple weather variables such as temperature, dewpoint,
+cloud cover, relative humidity, precipitation probability, wind speed,
+wind gusts, hazards, and any other available fields.
+
+Your job is to interpret numerical forecast data and deliver useful,
+actionable judgments. You should mentally correlate variables, identify
+time patterns, and provide deeper insight than a standard forecast.
+
+Examples of the kinds of questions you can answer:
+- "Will my tennis tournament get rained out?"
+- "Is fire weather risk elevated today?"
+- "What is tomorrow's weather forecast?"
+- "When is the windiest period over the next 48 hours?"
+- "Is it safe to hike tomorrow?"
+- "Will it be more humid on Tuesday than Wednesday?"
+
+ALWAYS ground your answer in the actual data. When relevant, cite specific
+forecast periods, ranges, or time windows.
+"""
+
+            # Convert NWS JSON to string (ensure serializable)
+            try:
+                nws_json_str = json.dumps(st.session_state["nws_data"])
+            except Exception:
+                st.error("Error converting NWS data to JSON.")
+                if debug_mode:
+                    st.json(traceback.format_exc())
+                st.stop()
+
+            # Construct final input to Gemini
+            full_input = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Here is the full NWS forecast dataset:\n\n{nws_json_str}"},
+                {"role": "user", "content": f"User question: {user_query}"}
+            ]
+
+            # Perform the streaming request
+            try:
+                response = model.generate_content(
+                    full_input,
+                    stream=True
+                )
+
+                st.write("### Answer")
+                answer_container = st.empty()
+                final_text = ""
+
+                for chunk in response:
+                    if chunk.text:
+                        final_text += chunk.text
+                        answer_container.write(final_text)
+
+                if debug_mode:
+                    st.write("### Debug: Raw Model Response")
+                    st.json(final_text)
+
+            except Exception as e:
+                st.error("Gemini request failed.")
+                if debug_mode:
+                    st.json(traceback.format_exc())
