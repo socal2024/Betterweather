@@ -106,7 +106,7 @@ st.title("NWS Gridpoint Forecast Explorer")
 
 st.write("""
 Welcome!  
-Enter a **U.S. city**, **ZIP code**, **full address**, or **latitude, longitude**  
+Enter a **full address**  
 to retrieve detailed National Weather Service gridpoint forecasts.
 """)
 
