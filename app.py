@@ -507,135 +507,172 @@ forecast periods, ranges, or time windows.
                     st.code(traceback.format_exc())
 
 # ---------------------------------------------------------
-# STEP FIVE — Conversational Mode with Memory (Unlimited Follow-Ups)
+# STEP FIVE — Create a Semantic Summary For Future Q&A
 # ---------------------------------------------------------
 
-st.write("## Continue the Conversation")
-st.write("""
-Ask follow-up questions or explore the forecast further.  
-This mode **remembers context**, so you can ask things like:
-- “What about in the evening?”  
-- “Will it still be windy later?”  
-- “Compare that to tomorrow morning.”  
-""")
+if "nws_data" in st.session_state and "nws_semantic_summary" not in st.session_state:
 
-# Ensure NWS data is present
-if "nws_data" not in st.session_state:
-    st.info("Fetch NWS data first to enable conversation mode.")
-else:
+    st.write("## Preparing Weather Intelligence Model")
+    st.info("Creating a compact internal weather summary for future questions...")
 
-    # Initialize chat history if needed
-    if "chat_history" not in st.session_state:
-        st.session_state["chat_history"] = []
-
-    # Persistent input field state
-    if "followup_question" not in st.session_state:
-        st.session_state["followup_question"] = ""
-
-    conv_debug = st.checkbox("Enable Conversation Debug Mode")
-
-    # Reuse Gemini configuration
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model = genai.GenerativeModel("gemini-2.5-flash")
-    except Exception:
-        st.error("Gemini API key missing or invalid.")
-        if conv_debug:
-            st.code(traceback.format_exc())
+    except Exception as e:
+        st.error("Gemini API key not found in st.secrets.")
         st.stop()
 
-    # -----------------------------------------------------
-    # DISPLAY CHAT HISTORY (oldest → newest)
-    # -----------------------------------------------------
-    if st.session_state["chat_history"]:
-        st.write("### Conversation History")
-        for i, turn in enumerate(st.session_state["chat_history"], 1):
-            st.markdown(f"**Q{i}:** {turn['user']}")
-            st.markdown(f"**A{i}:** {turn['assistant']}")
-            st.write("---")
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
-    # -----------------------------------------------------
-    # NEW QUESTION INPUT — always displayed at bottom
-    # -----------------------------------------------------
-    new_q = st.text_input(
-        "Ask another question",
-        value=st.session_state["followup_question"],
-        key="followup_question",
-        placeholder="e.g., What about later in the afternoon?",
-    )
+    with st.spinner("Analyzing detailed NWS data..."):
 
-    ask = st.button("Ask Follow-Up")
+        try:
+            full_json_str = json.dumps(st.session_state["nws_data"])
 
-    if ask and new_q.strip():
-        with st.spinner("Thinking…"):
+            summary_prompt = f"""
+You are an expert meteorologist. I will provide a very large JSON dataset from the
+National Weather Service gridpoint API.
 
-            # --- Build conversation context ---
-            today_str = datetime.now().strftime("%A %B %d, %Y")
-            system_prompt = f"""
-You are an expert meteorologist using detailed National Weather Service
-gridpoint forecast data. Today is {today_str}. Maintain context across
-turns. Use the provided dataset to answer questions with insight.
-""".strip()
+Your job:
+1. Read ALL the data carefully.
+2. Build a **compact internal representation** of the forecast.
+3. Extract all weather-relevant elements, including:
+   - temperatures
+   - dewpoint
+   - humidity
+   - cloud cover
+   - precipitation probability (PoP)
+   - wind speeds & gusts
+   - hazards, fire danger, marine concerns
+   - timing information
+   - trends across the next 48–72 hours
+4. Compress this knowledge into ~2000–5000 characters.
+5. Do NOT exceed 10,000 characters.
+6. Maintain enough detail to answer complex judgment questions like:
+   - “Will my tennis tournament get rained out?”
+   - “Is fire danger elevated?”
+   - “How windy will tomorrow afternoon be?”
+   - “Compare morning vs evening humidity.”
 
-            # Serialize dataset
-            try:
-                nws_json_str = json.dumps(st.session_state["nws_data"])
-            except Exception:
-                st.error("Failed to serialize NWS data.")
-                if conv_debug:
-                    st.code(traceback.format_exc())
-                st.stop()
+Your output must be a **single consolidated summary** containing:
+- Key weather variables by time period
+- Important thresholds
+- Notable hazards
+- Any other useful scientific insights
+"""
 
-            # Build content list
-            contents = [
-                system_prompt,
-                "Here is the full NWS dataset as JSON:",
-                nws_json_str,
-                "Conversation so far:"
-            ]
+            response = model.generate_content(
+                [
+                    {"role": "system", "content": summary_prompt},
+                    {"role": "user", "content": full_json_str}
+                ],
+                stream=False
+            )
 
-            for turn in st.session_state["chat_history"]:
-                contents.append(f"User: {turn['user']}")
-                contents.append(f"Assistant: {turn['assistant']}")
+            semantic_summary = response.text
+            st.session_state["nws_semantic_summary"] = semantic_summary
 
-            contents.append(f"User: {new_q}")
+            st.success("Semantic weather summary created successfully!")
 
-            # Debug info
-            if conv_debug:
-                st.write("### Conversation Debug")
-                st.json({
-                    "json_length": len(nws_json_str),
-                    "num_past_turns": len(st.session_state["chat_history"]),
-                    "new_question": new_q,
-                })
+            if st.checkbox("Show semantic weather summary (debug)"):
+                st.text_area("Weather Summary", semantic_summary, height=300)
 
-            # --- STREAMING RESPONSE ---
+        except Exception as e:
+            st.error("Failed to create weather summary.")
+            st.json(traceback.format_exc())
+
+# ---------------------------------------------------------
+# STEP SIX — Unlimited Conversational Weather Q&A
+# ---------------------------------------------------------
+
+st.write("## Continue Asking Weather Questions")
+
+# Must have created the summary before we allow questions
+if "nws_semantic_summary" not in st.session_state:
+    st.info("Semantic weather summary is not ready yet. Fetch weather data first.")
+else:
+    debug_mode = st.checkbox("Enable Detailed Conversation Debug")
+
+    # Initialize conversation history if needed
+    if "weather_chat_history" not in st.session_state:
+        st.session_state["weather_chat_history"] = []
+
+    # Display conversation history
+    for turn in st.session_state["weather_chat_history"]:
+        with st.chat_message(turn["role"]):
+            st.write(turn["content"])
+
+    # Input box for next question
+    user_q = st.chat_input("Ask another weather question...")
+
+    if user_q:
+        # Append user question
+        st.session_state["weather_chat_history"].append(
+            {"role": "user", "content": user_q}
+        )
+
+        try:
+            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        except Exception:
+            st.error("Gemini API key missing.")
+            st.stop()
+
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        # Build the model input
+        full_context = [
+            {"role": "system", "content": 
+                f"""
+You are an expert meteorologist. Today is {datetime.now().strftime("%A %B %d, %Y")}.
+Use the following compressed weather summary for all reasoning:
+
+{st.session_state["nws_semantic_summary"]}
+
+Your job:
+- Answer questions clearly and scientifically.
+- Incorporate timing, trends, and variables.
+- Give actionable decisions (rain risk, wind danger, fire weather).
+- Use knowledge extracted from the summary.
+                """
+            }
+        ]
+
+        # Add conversation history
+        for turn in st.session_state["weather_chat_history"]:
+            full_context.append(
+                {"role": turn["role"], "content": turn["content"]}
+            )
+
+        if debug_mode:
+            st.write("### Debug: Model Input")
+            st.json({
+                "num_turns": len(st.session_state["weather_chat_history"]),
+                "summary_length": len(st.session_state["nws_semantic_summary"]),
+                "full_context_length": sum(len(t["content"]) for t in st.session_state["weather_chat_history"]),
+            })
+
+        # Stream the answer
+        with st.chat_message("assistant"):
             try:
                 response = model.generate_content(
-                    contents,
-                    stream=True,
+                    full_context,
+                    stream=True
                 )
 
-                st.write("### Assistant Response")
-                final_answer = ""
-                answer_box = st.empty()
+                full_answer = ""
+                answer_area = st.empty()
 
                 for chunk in response:
                     if hasattr(chunk, "text") and chunk.text:
-                        final_answer += chunk.text
-                        answer_box.write(final_answer)
+                        full_answer += chunk.text
+                        answer_area.write(full_answer)
+
+                # Save assistant answer to history
+                st.session_state["weather_chat_history"].append(
+                    {"role": "assistant", "content": full_answer}
+                )
 
             except Exception as e:
                 st.error("Gemini request failed.")
-                if conv_debug:
-                    st.code(traceback.format_exc())
-                st.stop()
+                if debug_mode:
+                    st.json(traceback.format_exc())
 
-            # Store in history for future turns
-            st.session_state["chat_history"].append({
-                "user": new_q,
-                "assistant": final_answer,
-            })
-
-            # Reset the input box so it's ready for the next follow-up
-            st.session_state["followup_question"] = ""
