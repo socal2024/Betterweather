@@ -1,3 +1,7 @@
 streamlit
 requests
+pillow
 google-generativeai
+python-dateutil
+pytz
+zoneinfo; python_version < "3.9"
