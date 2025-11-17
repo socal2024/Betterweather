@@ -102,7 +102,7 @@ def geocode_us_location(location_text: str, debug=False):
 # ---------------------------------------------------------
 st.set_page_config(page_title="Detailed NWS Forecast")
 
-st.title("NWS Gridpoint Forecast Explorer")
+st.title("Detailed Hyperlocal Weather Forecats")
 
 st.write("""
 Welcome!  
@@ -114,7 +114,7 @@ debug_mode = st.checkbox("Enable debug mode")
 
 location_text = st.text_input(
     "Enter location",
-    placeholder="e.g., 1040 Lavender Lane, La Canada CA 91011, or 34.05,-118.25",
+    placeholder="e.g., 1 Main St, Huntington Beach, CA 92648",
 )
 
 submit = st.button("Find Location")
