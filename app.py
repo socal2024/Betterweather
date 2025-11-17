@@ -244,24 +244,35 @@ if "nws_data" in st.session_state:
 # =========================================================
 # Ask a Weather Question — SINGLE TURN
 # =========================================================
-
 if "nws_data" in st.session_state:
     st.write("## Ask a Weather Question")
-    user_query = st.text_input("Ask a weather question", placeholder="e.g., Will it rain during my tennis match?")
+    user_query = st.text_input(
+        "Ask a weather question",
+        placeholder="e.g., Will it rain during my tennis match?",
+    )
 
     if user_query:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         model = genai.GenerativeModel("gemini-2.5-flash")
 
-        # NEW: Use Reduced Hyperlocal Data
+        # Reduced hyperlocal dataset
         reduced_data = reduce_nws_data_for_llm(st.session_state["nws_data"])
         nws_json_str = json.dumps(reduced_data)
 
         today_str = datetime.now().strftime("%A %B %d, %Y")
         system_prompt = (
             f"You are an expert meteorologist. Today is {today_str}. "
-            f"Use the provided hyperlocal NWS dataset (72h window) to answer accurately."
+            "Use the provided hyperlocal NWS dataset (next 72h) to answer accurately. "
+            "Be quantitative when helpful."
         )
+
+        # --- DEBUG: show diagnostics for first Gemini call ---
+        if debug_mode:
+            st.write("### [DEBUG] First Gemini Call Diagnostics")
+            st.write(f"Length of reduced NWS JSON: {len(nws_json_str)} characters")
+            st.write(f"User query: {user_query}")
+            # Show a small preview of the JSON
+            st.text(nws_json_str[:1000] + ("..." if len(nws_json_str) > 1000 else ""))
 
         try:
             response = model.generate_content(
@@ -278,23 +289,34 @@ if "nws_data" in st.session_state:
                     final_text += chunk.text
                     ans_box.write(final_text)
 
+            # Store that we've started Q&A and seed chat history
             st.session_state["asked_initial_question"] = True
+            if "weather_chat_history" not in st.session_state:
+                st.session_state["weather_chat_history"] = []
+            st.session_state["weather_chat_history"].append(
+                {"role": "user", "content": user_query}
+            )
+            st.session_state["weather_chat_history"].append(
+                {"role": "assistant", "content": final_text}
+            )
 
-        except Exception:
-            st.error("Gemini request failed.")
+        except Exception as e:
+            st.error("Gemini request failed on initial question.")
             if debug_mode:
+                st.write("### [DEBUG] Exception in initial Gemini call")
+                st.write(f"Exception type: {type(e).__name__}")
                 st.code(traceback.format_exc())
 
 # =========================================================
-# CONTINUE ASKING — CHAT MODE
+# CONTINUE ASKING — CHAT MODE WITH DIAGNOSTICS
 # =========================================================
-
 if st.session_state.get("asked_initial_question", False):
     st.write("## Continue Asking Weather Questions")
 
     if "weather_chat_history" not in st.session_state:
         st.session_state["weather_chat_history"] = []
 
+    # Display chat history
     for turn in st.session_state["weather_chat_history"]:
         with st.chat_message(turn["role"]):
             st.write(turn["content"])
@@ -302,23 +324,55 @@ if st.session_state.get("asked_initial_question", False):
     user_q = st.chat_input("Ask another weather question...")
 
     if user_q:
-        st.session_state["weather_chat_history"].append({"role": "user", "content": user_q})
+        # Append new user message to history
+        st.session_state["weather_chat_history"].append(
+            {"role": "user", "content": user_q}
+        )
 
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         model = genai.GenerativeModel("gemini-2.5-flash")
 
-        # Keep using reduced hyperlocal data
+        # Recompute reduced hyperlocal dataset
         reduced_data = reduce_nws_data_for_llm(st.session_state["nws_data"])
         nws_json_str = json.dumps(reduced_data)
 
-        context = [
-            {"role": "system", "content": "You are an expert meteorologist. Use the prior context and the hyperlocal NWS dataset."},
-            {"role": "system", "content": nws_json_str},
-        ] + st.session_state["weather_chat_history"]
+        # Build a plain-text conversation summary for Gemini
+        conversation_lines = []
+        for turn in st.session_state["weather_chat_history"]:
+            prefix = "User: " if turn["role"] == "user" else "Assistant: "
+            conversation_lines.append(prefix + turn["content"])
+        conversation_text = "\n".join(conversation_lines)
+
+        today_str = datetime.now().strftime("%A %B %d, %Y")
+        system_prompt = (
+            f"You are an expert meteorologist. Today is {today_str}. "
+            "You will see: (1) a hyperlocal NWS dataset for the next 72h, "
+            "(2) the prior conversation, and (3) the new user question. "
+            "Use all of them to answer clearly and quantitatively."
+        )
+
+        # --- DEBUG: diagnostics for follow-up Gemini calls ---
+        if debug_mode:
+            st.write("### [DEBUG] Follow-up Gemini Call Diagnostics")
+            st.write(f"Length of reduced NWS JSON: {len(nws_json_str)} characters")
+            st.write(f"Conversation history length: {len(conversation_text)} characters")
+            st.write(f"New user question: {user_q}")
+            st.text("Conversation preview:\n" + conversation_text[:1000] +
+                    ("..." if len(conversation_text) > 1000 else ""))
+
+        # Construct content in a format Gemini expects (list of strings)
+        gemini_input = [
+            system_prompt,
+            "NWS hyperlocal data (JSON):",
+            nws_json_str,
+            "Conversation so far:",
+            conversation_text,
+            f"New user question: {user_q}",
+        ]
 
         with st.chat_message("assistant"):
             try:
-                response = model.generate_content(context, stream=True)
+                response = model.generate_content(gemini_input, stream=True)
 
                 answer = ""
                 ans_box = st.empty()
@@ -327,7 +381,14 @@ if st.session_state.get("asked_initial_question", False):
                         answer += chunk.text
                         ans_box.write(answer)
 
-                st.session_state["weather_chat_history"].append({"role": "assistant", "content": answer})
+                # Save assistant reply back into history
+                st.session_state["weather_chat_history"].append(
+                    {"role": "assistant", "content": answer}
+                )
 
-            except Exception:
-                st.error("Gemini request failed.")
+            except Exception as e:
+                st.error("Gemini request failed on follow-up question.")
+                if debug_mode:
+                    st.write("### [DEBUG] Exception in follow-up Gemini call")
+                    st.write(f"Exception type: {type(e).__name__}")
+                    st.code(traceback.format_exc())
