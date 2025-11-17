@@ -1,7 +1,3 @@
-# =========================================================
-# Streamlit Hyperlocal Weather App (with TZ Fix, Debug, and Chat Fix)
-# =========================================================
-
 import streamlit as st
 import requests
 import traceback
@@ -9,22 +5,26 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import google.generativeai as genai
+from PIL import Image
+import io
 
-# Streamlit Config
+# =========================================================
+# STREAMLIT CONFIG
+# =========================================================
 st.set_page_config(page_title="Detailed Hyperlocal Weather Forecast")
 
 debug_mode = st.checkbox("Enable Debug Mode (Developer Only)")
 st.title("Detailed Hyperlocal Weather Forecasts")
 st.write("Enter a **full address** to retrieve detailed National Weather Service gridpoint forecasts.")
 
-# =========================================================
-# Geocoding
-# =========================================================
 
+# =========================================================
+# GEOCODING
+# =========================================================
 def geocode_us_location(location_text: str):
     diagnostics = {}
 
-    # Allow latitude,longitude direct input
+    # Allow direct lat,lon input
     if "," in location_text:
         parts = [p.strip() for p in location_text.split(",")]
         if len(parts) == 2:
@@ -51,17 +51,16 @@ def geocode_us_location(location_text: str):
         if matches:
             coords = matches[0]["coordinates"]
             return (coords["y"], coords["x"]), diagnostics
-
     except Exception:
         diagnostics["exception"] = traceback.format_exc()
 
     diagnostics["error"] = "Unable to geocode address."
     return None, diagnostics
 
-# =========================================================
-# Safe GET
-# =========================================================
 
+# =========================================================
+# SAFE GET
+# =========================================================
 def safe_get(url, headers):
     diagnostics = {"url": url}
     try:
@@ -74,7 +73,7 @@ def safe_get(url, headers):
 
         try:
             return resp.json(), diagnostics
-        except:
+        except Exception:
             diagnostics["error"] = "Failed to parse JSON."
             return None, diagnostics
 
@@ -82,15 +81,14 @@ def safe_get(url, headers):
         diagnostics["exception"] = traceback.format_exc()
         return None, diagnostics
 
-# =========================================================
-# Fetch NWS Data
-# =========================================================
 
+# =========================================================
+# FETCH NWS DATA
+# =========================================================
 def fetch_nws_from_latlon(lat, lon):
     diagnostics = {}
     headers = {"User-Agent": "NWS-Forecast-App/1.0 (contact@example.com)"}
 
-    # Points endpoint
     points_url = f"https://api.weather.gov/points/{lat},{lon}"
     points_json, diag_points = safe_get(points_url, headers)
     diagnostics["points"] = diag_points
@@ -109,7 +107,7 @@ def fetch_nws_from_latlon(lat, lon):
 
     results = {"metadata": props, "fetch_status": {}}
 
-    # Store the time zone for this forecast location
+    # Extract time zone
     results["time_zone"] = props.get("timeZone", "UTC")
 
     for key, url in urls.items():
@@ -128,20 +126,18 @@ def fetch_nws_from_latlon(lat, lon):
 
     return results, diagnostics
 
-# =========================================================
-# Reduce NWS Data (Hyperlocal 72h Window)
-# =========================================================
 
+# =========================================================
+# REDUCE NWS DATA TO 72 HOURS + KEY VARIABLES
+# =========================================================
 def reduce_nws_data_for_llm(nws):
-    """Keep hyperlocal gridpoint variables + 72h hourly + daily."""
-
     reduced = {}
 
     # --- DAILY ---
     daily = nws.get("forecast", {})
     reduced["daily"] = daily.get("properties", {}).get("periods", [])
 
-    # --- HOURLY (72 HOURS) ---
+    # --- HOURLY (72 hours) ---
     hourly = nws.get("forecast_hourly", {})
     hourly = nws.get("forecastHourly", hourly)
     periods = hourly.get("properties", {}).get("periods", [])
@@ -153,16 +149,15 @@ def reduce_nws_data_for_llm(nws):
     filtered_hourly = []
     for p in periods:
         try:
-            t = datetime.fromisoformat(p["startTime"])
-            t_local = t.astimezone(tz)
-            if t_local <= cutoff:
+            t = datetime.fromisoformat(p["startTime"]).astimezone(tz)
+            if t <= cutoff:
                 filtered_hourly.append(p)
         except:
             pass
 
     reduced["hourly"] = filtered_hourly
 
-    # --- GRID VARIABLES (Hyperlocal) ---
+    # --- GRID VARIABLES ---
     grid = nws.get("forecast_grid_data", {})
     grid_props = grid.get("properties", {})
 
@@ -178,20 +173,70 @@ def reduce_nws_data_for_llm(nws):
         "quantitativePrecipitation",
     ]
 
-    grid_subset = {}
-    for key in keep_keys:
-        if key in grid_props:
-            grid_subset[key] = grid_props[key]
-
+    grid_subset = {k: grid_props[k] for k in keep_keys if k in grid_props}
     reduced["grid"] = grid_subset
 
     return reduced
 
+
 # =========================================================
-# User Input for Location
+# RADAR + GOES IMAGE HELPERS
 # =========================================================
 
-location_text = st.text_input("Enter location", placeholder="e.g., 1 Main St, Huntington Beach, CA 92648")
+def latlon_to_pixel_conus(lat, lon, img_width, img_height):
+    # Valid for standard CONUS products
+    lon_min, lon_max = -130, -60
+    lat_max, lat_min = 55, 20
+
+    x = (lon - lon_min) / (lon_max - lon_min) * img_width
+    y = (lat_max - lat) / (lat_max - lat_min) * img_height
+
+    return int(x), int(y)
+
+
+def crop_around_location(img, lat, lon, crop_size=600):
+    w, h = img.size
+    px, py = latlon_to_pixel_conus(lat, lon, w, h)
+
+    half = crop_size // 2
+    left = max(px - half, 0)
+    right = min(px + half, w)
+    top = max(py - half, 0)
+    bottom = min(py + half, h)
+
+    return img.crop((left, top, right, bottom))
+
+
+def fetch_radar_image():
+    url = "https://radar.weather.gov/ridge/standard/CONUS_0.png"
+    r = requests.get(url)
+    return Image.open(io.BytesIO(r.content))
+
+
+def fetch_goes_image():
+    url = "https://cdn.star.nesdis.noaa.gov/GOES16/ABI/CONUS/GEOCOLOR/latest.jpg"
+    r = requests.get(url)
+    return Image.open(io.BytesIO(r.content))
+
+
+def get_location_centered_weather_images(lat, lon, crop_size=600):
+    radar = fetch_radar_image()
+    goes = fetch_goes_image()
+
+    radar_crop = crop_around_location(radar, lat, lon, crop_size)
+    goes_crop = crop_around_location(goes, lat, lon, crop_size)
+
+    return radar_crop, goes_crop
+
+
+# =========================================================
+# USER LOCATION INPUT
+# =========================================================
+
+location_text = st.text_input(
+    "Enter location", 
+    placeholder="e.g., 1 Main St, Huntington Beach, CA 92648"
+)
 
 if location_text.strip():
     st.info("Finding your location…")
@@ -201,7 +246,6 @@ if location_text.strip():
     if coords:
         lat, lon = coords
         st.success(f"Location resolved: **{lat:.5f}, {lon:.5f}**")
-
         st.session_state["lat"] = lat
         st.session_state["lon"] = lon
 
@@ -216,18 +260,21 @@ if location_text.strip():
             st.error("Unable to retrieve NWS weather data.")
             if debug_mode:
                 st.json(nws_diag)
+
     else:
         st.error("Could not resolve that location.")
         if debug_mode:
             st.json(diag)
 
+
 # =========================================================
-# Tomorrow Summary (with Local Time Zone)
+# TOMORROW SUMMARY WITH TZ SUPPORT
 # =========================================================
 
 if "nws_data" in st.session_state:
     nws = st.session_state["nws_data"]
     tz = ZoneInfo(st.session_state["time_zone"])
+
     local_today = datetime.now(tz).date()
     local_tomorrow = local_today + timedelta(days=1)
 
@@ -245,28 +292,24 @@ if "nws_data" in st.session_state:
 
     if tomorrow_periods:
         p = tomorrow_periods[0]
-
         summary = (
             f"{p.get('name', 'Tomorrow')} will bring {p.get('shortForecast', '').lower()}. "
             f"Temperatures around {p.get('temperature')}°{p.get('temperatureUnit')}, "
             f"winds from the {p.get('windDirection')} at {p.get('windSpeed')}. "
             f"{p.get('detailedForecast')}"
         )
-
         st.write("### Tomorrow's Weather Summary")
         st.write(summary)
 
+
 # =========================================================
-# Ask a Weather Question — FIRST QUESTION ONLY
+# FIRST QUESTION TO GEMINI
 # =========================================================
 
 if "nws_data" in st.session_state and not st.session_state.get("asked_initial_question", False):
 
     st.write("## Ask a Weather Question")
-    user_query = st.text_input(
-        "Ask a weather question",
-        placeholder="e.g., Will it rain during my tennis match?",
-    )
+    user_query = st.text_input("Ask a weather question", placeholder="e.g., Will it rain during my tennis match?")
 
     if user_query:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -275,18 +318,22 @@ if "nws_data" in st.session_state and not st.session_state.get("asked_initial_qu
         reduced_data = reduce_nws_data_for_llm(st.session_state["nws_data"])
         nws_json_str = json.dumps(reduced_data)
 
+        # Radar + GOES images
+        lat = st.session_state["lat"]
+        lon = st.session_state["lon"]
+        radar_img, goes_img = get_location_centered_weather_images(lat, lon)
+
         tz = ZoneInfo(st.session_state["time_zone"])
         today_str = datetime.now(tz).strftime("%A %B %d, %Y")
 
         system_prompt = (
             f"You are an expert meteorologist. Today is {today_str} in timezone {st.session_state['time_zone']}. "
-            "Use the 72-hour hyperlocal dataset to answer accurately."
+            "Use the 72-hour hyperlocal dataset, radar, and satellite imagery to answer accurately."
         )
 
         if debug_mode:
-            st.write("### [DEBUG] First Gemini Call Diagnostics")
-            st.write(f"Reduced JSON size: {len(nws_json_str)} chars")
-            st.text(nws_json_str[:1000] + ("..." if len(nws_json_str) > 1000 else ""))
+            st.write("### [DEBUG] Gemini First Call Diagnostics")
+            st.write(f"Reduced JSON chars: {len(nws_json_str)}")
 
         try:
             st.write("### Answer")
@@ -295,15 +342,24 @@ if "nws_data" in st.session_state and not st.session_state.get("asked_initial_qu
 
             with st.spinner("Analyzing..."):
                 response = model.generate_content(
-                    [system_prompt, nws_json_str, f"User question: {user_query}"],
+                    [
+                        system_prompt,
+                        "Hyperlocal NWS data (JSON):",
+                        nws_json_str,
+                        "Location-centered radar image:",
+                        radar_img,
+                        "Location-centered GOES GeoColor satellite image:",
+                        goes_img,
+                        f"User question: {user_query}",
+                    ],
                     stream=True,
                 )
+
                 for chunk in response:
                     if hasattr(chunk, "text") and chunk.text:
                         final_text += chunk.text
                         ans_box.write(final_text)
 
-            # Set up chat mode
             st.session_state["asked_initial_question"] = True
             st.session_state["weather_chat_history"] = [
                 {"role": "user", "content": user_query},
@@ -313,11 +369,11 @@ if "nws_data" in st.session_state and not st.session_state.get("asked_initial_qu
         except Exception:
             st.error("Gemini request failed.")
             if debug_mode:
-                st.write("### [DEBUG] Exception")
                 st.code(traceback.format_exc())
 
+
 # =========================================================
-# CONTINUE CHAT MODE
+# CHAT MODE
 # =========================================================
 
 if st.session_state.get("asked_initial_question", False):
@@ -326,7 +382,7 @@ if st.session_state.get("asked_initial_question", False):
 
     history = st.session_state["weather_chat_history"]
 
-    # Display chat
+    # Show chat history
     for turn in history:
         with st.chat_message(turn["role"]):
             st.write(turn["content"])
@@ -342,28 +398,36 @@ if st.session_state.get("asked_initial_question", False):
         reduced_data = reduce_nws_data_for_llm(st.session_state["nws_data"])
         nws_json_str = json.dumps(reduced_data)
 
+        # Radar + GOES again for each question
+        lat = st.session_state["lat"]
+        lon = st.session_state["lon"]
+        radar_img, goes_img = get_location_centered_weather_images(lat, lon)
+
         tz = ZoneInfo(st.session_state["time_zone"])
         today_str = datetime.now(tz).strftime("%A %B %d, %Y")
 
-        # Construct transcript
-        conv_lines = []
+        conv = []
         for t in history:
             prefix = "User: " if t["role"] == "user" else "Assistant: "
-            conv_lines.append(prefix + t["content"])
-        conv_text = "\n".join(conv_lines)
+            conv.append(prefix + t["content"])
+        conv_text = "\n".join(conv)
 
         system_prompt = (
-            f"You are an expert meteorologist. Today is {today_str} "
-            f"in timezone {st.session_state['time_zone']}. Use the dataset and prior conversation."
+            f"You are an expert meteorologist. Today is {today_str} in timezone {st.session_state['time_zone']}. "
+            "Use the NWS dataset, radar, satellite imagery, and conversation context."
         )
 
         gemini_input = [
             system_prompt,
-            "Hyperlocal NWS dataset:",
+            "Hyperlocal NWS data:",
             nws_json_str,
+            "Radar image:",
+            radar_img,
+            "GOES GeoColor satellite image:",
+            goes_img,
             "Conversation so far:",
             conv_text,
-            f"New user question: {user_q}",
+            f"New question: {user_q}",
         ]
 
         with st.chat_message("assistant"):
@@ -384,5 +448,4 @@ if st.session_state.get("asked_initial_question", False):
             except Exception:
                 st.error("Gemini request failed.")
                 if debug_mode:
-                    st.write("### [DEBUG] Exception")
                     st.code(traceback.format_exc())
