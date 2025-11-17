@@ -1,5 +1,5 @@
 # =========================================================
-# Revised Streamlit Weather App with Hyperlocal 72h Reduction
+# Streamlit Hyperlocal Weather App (with TZ Fix, Debug, and Chat Fix)
 # =========================================================
 
 import streamlit as st
@@ -7,9 +7,10 @@ import requests
 import traceback
 import json
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import google.generativeai as genai
 
-# Streamlit Setup
+# Streamlit Config
 st.set_page_config(page_title="Detailed Hyperlocal Weather Forecast")
 
 debug_mode = st.checkbox("Enable Debug Mode (Developer Only)")
@@ -17,13 +18,13 @@ st.title("Detailed Hyperlocal Weather Forecasts")
 st.write("Enter a **full address** to retrieve detailed National Weather Service gridpoint forecasts.")
 
 # =========================================================
-# Helper: Geocoding using US Census API
+# Geocoding
 # =========================================================
 
 def geocode_us_location(location_text: str):
     diagnostics = {}
 
-    # Allow direct lat,lon input
+    # Allow latitude,longitude direct input
     if "," in location_text:
         parts = [p.strip() for p in location_text.split(",")]
         if len(parts) == 2:
@@ -32,7 +33,7 @@ def geocode_us_location(location_text: str):
             except:
                 diagnostics["error"] = "Could not parse lat/lon."
 
-    census_url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+    url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
     params = {
         "address": location_text,
         "benchmark": "Public_AR_Current",
@@ -40,7 +41,7 @@ def geocode_us_location(location_text: str):
     }
 
     try:
-        resp = requests.get(census_url, params=params, timeout=10)
+        resp = requests.get(url, params=params, timeout=10)
         if resp.status_code != 200:
             diagnostics["error"] = f"Geocoding API returned HTTP {resp.status_code}"
             return None, diagnostics
@@ -58,7 +59,7 @@ def geocode_us_location(location_text: str):
     return None, diagnostics
 
 # =========================================================
-# Helper: Safe GET
+# Safe GET
 # =========================================================
 
 def safe_get(url, headers):
@@ -82,13 +83,14 @@ def safe_get(url, headers):
         return None, diagnostics
 
 # =========================================================
-# Fetch ALL NWS Data
+# Fetch NWS Data
 # =========================================================
 
 def fetch_nws_from_latlon(lat, lon):
     diagnostics = {}
     headers = {"User-Agent": "NWS-Forecast-App/1.0 (contact@example.com)"}
 
+    # Points endpoint
     points_url = f"https://api.weather.gov/points/{lat},{lon}"
     points_json, diag_points = safe_get(points_url, headers)
     diagnostics["points"] = diag_points
@@ -107,6 +109,9 @@ def fetch_nws_from_latlon(lat, lon):
 
     results = {"metadata": props, "fetch_status": {}}
 
+    # Store the time zone for this forecast location
+    results["time_zone"] = props.get("timeZone", "UTC")
+
     for key, url in urls.items():
         if not url:
             results["fetch_status"][key] = "Missing URL"
@@ -124,35 +129,40 @@ def fetch_nws_from_latlon(lat, lon):
     return results, diagnostics
 
 # =========================================================
-# NEW: Reduce NWS Data for Gemini (Hyperlocal 72h)
+# Reduce NWS Data (Hyperlocal 72h Window)
 # =========================================================
 
 def reduce_nws_data_for_llm(nws):
-    """Keeps hyperlocal 2.5 km gridpoint forecast but trims unused bulk data."""
+    """Keep hyperlocal gridpoint variables + 72h hourly + daily."""
 
     reduced = {}
 
-    # --- DAILY FORECAST ---
+    # --- DAILY ---
     daily = nws.get("forecast", {})
     reduced["daily"] = daily.get("properties", {}).get("periods", [])
 
-    # --- HOURLY FORECAST (NEXT 72 HOURS) ---
-    hourly = nws.get("forecast_hourly", nws.get("forecastHourly", {}))
-    hourly_periods = hourly.get("properties", {}).get("periods", [])
+    # --- HOURLY (72 HOURS) ---
+    hourly = nws.get("forecast_hourly", {})
+    hourly = nws.get("forecastHourly", hourly)
+    periods = hourly.get("properties", {}).get("periods", [])
 
-    cutoff = datetime.utcnow() + timedelta(hours=72)
+    tz = ZoneInfo(nws["time_zone"])
+    local_now = datetime.now(tz)
+    cutoff = local_now + timedelta(hours=72)
+
     filtered_hourly = []
-    for p in hourly_periods:
+    for p in periods:
         try:
-            t = p["startTime"].replace("Z", "+00:00")
-            if datetime.fromisoformat(t) <= cutoff:
+            t = datetime.fromisoformat(p["startTime"])
+            t_local = t.astimezone(tz)
+            if t_local <= cutoff:
                 filtered_hourly.append(p)
         except:
             pass
 
     reduced["hourly"] = filtered_hourly
 
-    # --- KEEP KEY GRIDPOINT VARIABLES ONLY ---
+    # --- GRID VARIABLES (Hyperlocal) ---
     grid = nws.get("forecast_grid_data", {})
     grid_props = grid.get("properties", {})
 
@@ -185,11 +195,13 @@ location_text = st.text_input("Enter location", placeholder="e.g., 1 Main St, Hu
 
 if location_text.strip():
     st.info("Finding your location…")
+
     coords, diag = geocode_us_location(location_text.strip())
 
     if coords:
         lat, lon = coords
         st.success(f"Location resolved: **{lat:.5f}, {lon:.5f}**")
+
         st.session_state["lat"] = lat
         st.session_state["lon"] = lon
 
@@ -198,7 +210,8 @@ if location_text.strip():
 
         if nws_data:
             st.session_state["nws_data"] = nws_data
-            st.success("Weather data loaded!")
+            st.session_state["time_zone"] = nws_data["time_zone"]
+            st.success(f"Weather data loaded (TZ = {nws_data['time_zone']})")
         else:
             st.error("Unable to retrieve NWS weather data.")
             if debug_mode:
@@ -209,42 +222,46 @@ if location_text.strip():
             st.json(diag)
 
 # =========================================================
-# Tomorrow Summary
+# Tomorrow Summary (with Local Time Zone)
 # =========================================================
 
 if "nws_data" in st.session_state:
-    forecast = st.session_state["nws_data"].get("forecast", {})
+    nws = st.session_state["nws_data"]
+    tz = ZoneInfo(st.session_state["time_zone"])
+    local_today = datetime.now(tz).date()
+    local_tomorrow = local_today + timedelta(days=1)
+
+    forecast = nws.get("forecast", {})
     periods = forecast.get("properties", {}).get("periods", [])
 
-    if not periods:
-        st.warning("No forecast period data available.")
-    else:
-        tomorrow = datetime.now().date() + timedelta(days=1)
-        tomorrow_periods = []
+    tomorrow_periods = []
+    for p in periods:
+        try:
+            t = datetime.fromisoformat(p["startTime"]).astimezone(tz)
+            if t.date() == local_tomorrow:
+                tomorrow_periods.append(p)
+        except:
+            pass
 
-        for p in periods:
-            try:
-                if datetime.fromisoformat(p["startTime"]).date() == tomorrow:
-                    tomorrow_periods.append(p)
-            except:
-                pass
+    if tomorrow_periods:
+        p = tomorrow_periods[0]
 
-        if tomorrow_periods:
-            p = tomorrow_periods[0]
-            summary = (
-                f"{p.get('name', 'Tomorrow')} will bring {p.get('shortForecast', '').lower()}. "
-                f"Temperatures around {p.get('temperature')}°{p.get('temperatureUnit')}, "
-                f"winds from the {p.get('windDirection')} at {p.get('windSpeed')}. "
-                f"{p.get('detailedForecast')}"
-            )
+        summary = (
+            f"{p.get('name', 'Tomorrow')} will bring {p.get('shortForecast', '').lower()}. "
+            f"Temperatures around {p.get('temperature')}°{p.get('temperatureUnit')}, "
+            f"winds from the {p.get('windDirection')} at {p.get('windSpeed')}. "
+            f"{p.get('detailedForecast')}"
+        )
 
-            st.write("### Tomorrow's Weather Summary")
-            st.write(summary)
+        st.write("### Tomorrow's Weather Summary")
+        st.write(summary)
 
 # =========================================================
-# Ask a Weather Question — SINGLE TURN
+# Ask a Weather Question — FIRST QUESTION ONLY
 # =========================================================
-if "nws_data" in st.session_state:
+
+if "nws_data" in st.session_state and not st.session_state.get("asked_initial_question", False):
+
     st.write("## Ask a Weather Question")
     user_query = st.text_input(
         "Ask a weather question",
@@ -255,140 +272,117 @@ if "nws_data" in st.session_state:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         model = genai.GenerativeModel("gemini-2.5-flash")
 
-        # Reduced hyperlocal dataset
         reduced_data = reduce_nws_data_for_llm(st.session_state["nws_data"])
         nws_json_str = json.dumps(reduced_data)
 
-        today_str = datetime.now().strftime("%A %B %d, %Y")
+        tz = ZoneInfo(st.session_state["time_zone"])
+        today_str = datetime.now(tz).strftime("%A %B %d, %Y")
+
         system_prompt = (
-            f"You are an expert meteorologist. Today is {today_str}. "
-            "Use the provided hyperlocal NWS dataset (next 72h) to answer accurately. "
-            "Be quantitative when helpful."
+            f"You are an expert meteorologist. Today is {today_str} in timezone {st.session_state['time_zone']}. "
+            "Use the 72-hour hyperlocal dataset to answer accurately."
         )
 
-        # --- DEBUG: show diagnostics for first Gemini call ---
         if debug_mode:
             st.write("### [DEBUG] First Gemini Call Diagnostics")
-            st.write(f"Length of reduced NWS JSON: {len(nws_json_str)} characters")
-            st.write(f"User query: {user_query}")
-            # Show a small preview of the JSON
+            st.write(f"Reduced JSON size: {len(nws_json_str)} chars")
             st.text(nws_json_str[:1000] + ("..." if len(nws_json_str) > 1000 else ""))
 
         try:
-            response = model.generate_content(
-                [system_prompt, nws_json_str, f"User question: {user_query}"],
-                stream=True,
-            )
-
             st.write("### Answer")
             ans_box = st.empty()
             final_text = ""
 
-            for chunk in response:
-                if hasattr(chunk, "text") and chunk.text:
-                    final_text += chunk.text
-                    ans_box.write(final_text)
+            with st.spinner("Analyzing..."):
+                response = model.generate_content(
+                    [system_prompt, nws_json_str, f"User question: {user_query}"],
+                    stream=True,
+                )
+                for chunk in response:
+                    if hasattr(chunk, "text") and chunk.text:
+                        final_text += chunk.text
+                        ans_box.write(final_text)
 
-            # Store that we've started Q&A and seed chat history
+            # Set up chat mode
             st.session_state["asked_initial_question"] = True
-            if "weather_chat_history" not in st.session_state:
-                st.session_state["weather_chat_history"] = []
-            st.session_state["weather_chat_history"].append(
-                {"role": "user", "content": user_query}
-            )
-            st.session_state["weather_chat_history"].append(
-                {"role": "assistant", "content": final_text}
-            )
+            st.session_state["weather_chat_history"] = [
+                {"role": "user", "content": user_query},
+                {"role": "assistant", "content": final_text},
+            ]
 
-        except Exception as e:
-            st.error("Gemini request failed on initial question.")
+        except Exception:
+            st.error("Gemini request failed.")
             if debug_mode:
-                st.write("### [DEBUG] Exception in initial Gemini call")
-                st.write(f"Exception type: {type(e).__name__}")
+                st.write("### [DEBUG] Exception")
                 st.code(traceback.format_exc())
 
 # =========================================================
-# CONTINUE ASKING — CHAT MODE WITH DIAGNOSTICS
+# CONTINUE CHAT MODE
 # =========================================================
+
 if st.session_state.get("asked_initial_question", False):
+
     st.write("## Continue Asking Weather Questions")
 
-    if "weather_chat_history" not in st.session_state:
-        st.session_state["weather_chat_history"] = []
+    history = st.session_state["weather_chat_history"]
 
-    # Display chat history
-    for turn in st.session_state["weather_chat_history"]:
+    # Display chat
+    for turn in history:
         with st.chat_message(turn["role"]):
             st.write(turn["content"])
 
     user_q = st.chat_input("Ask another weather question...")
 
     if user_q:
-        # Append new user message to history
-        st.session_state["weather_chat_history"].append(
-            {"role": "user", "content": user_q}
-        )
+        history.append({"role": "user", "content": user_q})
 
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         model = genai.GenerativeModel("gemini-2.5-flash")
 
-        # Recompute reduced hyperlocal dataset
         reduced_data = reduce_nws_data_for_llm(st.session_state["nws_data"])
         nws_json_str = json.dumps(reduced_data)
 
-        # Build a plain-text conversation summary for Gemini
-        conversation_lines = []
-        for turn in st.session_state["weather_chat_history"]:
-            prefix = "User: " if turn["role"] == "user" else "Assistant: "
-            conversation_lines.append(prefix + turn["content"])
-        conversation_text = "\n".join(conversation_lines)
+        tz = ZoneInfo(st.session_state["time_zone"])
+        today_str = datetime.now(tz).strftime("%A %B %d, %Y")
 
-        today_str = datetime.now().strftime("%A %B %d, %Y")
+        # Construct transcript
+        conv_lines = []
+        for t in history:
+            prefix = "User: " if t["role"] == "user" else "Assistant: "
+            conv_lines.append(prefix + t["content"])
+        conv_text = "\n".join(conv_lines)
+
         system_prompt = (
-            f"You are an expert meteorologist. Today is {today_str}. "
-            "You will see: (1) a hyperlocal NWS dataset for the next 72h, "
-            "(2) the prior conversation, and (3) the new user question. "
-            "Use all of them to answer clearly and quantitatively."
+            f"You are an expert meteorologist. Today is {today_str} "
+            f"in timezone {st.session_state['time_zone']}. Use the dataset and prior conversation."
         )
 
-        # --- DEBUG: diagnostics for follow-up Gemini calls ---
-        if debug_mode:
-            st.write("### [DEBUG] Follow-up Gemini Call Diagnostics")
-            st.write(f"Length of reduced NWS JSON: {len(nws_json_str)} characters")
-            st.write(f"Conversation history length: {len(conversation_text)} characters")
-            st.write(f"New user question: {user_q}")
-            st.text("Conversation preview:\n" + conversation_text[:1000] +
-                    ("..." if len(conversation_text) > 1000 else ""))
-
-        # Construct content in a format Gemini expects (list of strings)
         gemini_input = [
             system_prompt,
-            "NWS hyperlocal data (JSON):",
+            "Hyperlocal NWS dataset:",
             nws_json_str,
             "Conversation so far:",
-            conversation_text,
+            conv_text,
             f"New user question: {user_q}",
         ]
 
         with st.chat_message("assistant"):
             try:
-                response = model.generate_content(gemini_input, stream=True)
-
                 answer = ""
                 ans_box = st.empty()
-                for chunk in response:
-                    if hasattr(chunk, "text") and chunk.text:
-                        answer += chunk.text
-                        ans_box.write(answer)
 
-                # Save assistant reply back into history
-                st.session_state["weather_chat_history"].append(
-                    {"role": "assistant", "content": answer}
-                )
+                with st.spinner("Analyzing..."):
+                    response = model.generate_content(gemini_input, stream=True)
 
-            except Exception as e:
-                st.error("Gemini request failed on follow-up question.")
+                    for chunk in response:
+                        if hasattr(chunk, "text") and chunk.text:
+                            answer += chunk.text
+                            ans_box.write(answer)
+
+                history.append({"role": "assistant", "content": answer})
+
+            except Exception:
+                st.error("Gemini request failed.")
                 if debug_mode:
-                    st.write("### [DEBUG] Exception in follow-up Gemini call")
-                    st.write(f"Exception type: {type(e).__name__}")
+                    st.write("### [DEBUG] Exception")
                     st.code(traceback.format_exc())
