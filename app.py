@@ -237,6 +237,53 @@ if "nws_data" in st.session_state:
 # STEP: BUILD CLEAN NWS JSON FOR GEMINI (COMPRESSION POINT)
 # =========================================================
 def build_clean_nws_json():
+    from datetime import datetime, timedelta
+
+    raw = st.session_state.get("nws_data", {})
+    cutoff = datetime.now().astimezone() + timedelta(hours=72)
+
+    def within(dt_str):
+        try:
+            ts = dt_str.split("/")[0]
+            return datetime.fromisoformat(ts) < cutoff
+        except:
+            return False
+
+    # Filter forecast periods
+    fp = raw.get("forecast", {}).get("properties", {}).get("periods", [])
+    filtered_periods = [p for p in fp if within(p.get("startTime", "9999"))]
+
+    # Filter hourly
+    hourly = raw.get("forecast_hourly", {}).get("properties", {}).get("periods", [])
+    filtered_hourly = [h for h in hourly if within(h.get("startTime", "9999"))]
+
+    # Filter grid data
+    grid = raw.get("forecast_grid_data", {}).get("properties", {})
+    filtered_grid = {}
+    for k, v in grid.items():
+        if isinstance(v, dict) and "values" in v:
+            filtered_vals = [x for x in v["values"] if within(x.get("validTime", "9999"))]
+            if filtered_vals:
+                newv = v.copy()
+                newv["values"] = filtered_vals
+                filtered_grid[k] = newv
+        else:
+            filtered_grid[k] = v
+
+    clean = {
+        "metadata": raw.get("metadata", {}),
+        "forecast": {"properties": {"periods": filtered_periods}},
+        "forecastHourly": {"properties": {"periods": filtered_hourly}},
+        "forecastGridData": {"properties": filtered_grid},
+        "stations": raw.get("stations", {}),
+        "gridInfo": {
+            "office": raw.get("metadata", {}).get("gridId"),
+            "gridX": raw.get("metadata", {}).get("gridX"),
+            "gridY": raw.get("metadata", {}).get("gridY"),
+        }
+    }
+
+    return json.dumps(clean, ensure_ascii=False)():
     """Return only the clean JSON subset of the NWS data.
     Excludes diagnostics, error strings, and fetch-status details.
     This is the main compression step before sending to Gemini.
@@ -319,6 +366,7 @@ Your job:
                 """.strip()
 
                 response = model.generate_content(
+                        [summary_prompt, full_json_str],(
                     [
                         {"role": "system", "content": summary_prompt},
                         {"role": "user", "content": full_json_str},
@@ -456,9 +504,14 @@ if (
             model = genai.GenerativeModel("gemini-2.5-flash")
 
             system_context = (
-                f"You are an expert meteorologist. Today is {datetime.now().strftime('%A %B %d, %Y')}\n"
-                "Use the following compressed weather summary for all reasoning:\n\n"
-                f"{st.session_state['nws_semantic_summary']}\n\n"
+                f"You are an expert meteorologist. Today is {datetime.now().strftime('%A %B %d, %Y')}
+"
+                "Use the following compressed weather summary for all reasoning:
+
+"
+                f"{st.session_state['nws_semantic_summary']}
+
+"
                 "Your job: answer questions clearly and scientifically, include timing, trends, and actionable judgments."
             )
 
